@@ -1,19 +1,14 @@
-# crawler.py (본문 추출 강화판)
-import re, html, time, requests
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
+import re, html, time, random, requests
+from urllib.parse import urlparse, parse_qs, urlunparse, urljoin
 from bs4 import BeautifulSoup
 
-UA = ("Mozilla/5.0 (Linux; Android 11; SM-G973N) "
-      "AppleWebKit/537.36 (KHTML, like Gecko) "
-      "Chrome/120.0.0.0 Mobile Safari/537.36")
+USER_AGENTS = [
+    "Mozilla/5.0 (Linux; Android 11; SM-G973N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+]
 
 session = requests.Session()
-session.headers.update({
-    "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
-    "Connection": "close",
-})
 
 def _clean(txt):
     txt = html.unescape(txt)
@@ -39,41 +34,35 @@ def _normalize(url):
 def _get_html(url):
     for _ in range(3):
         try:
+            session.headers["User-Agent"] = random.choice(USER_AGENTS)
             res = session.get(url, timeout=(8, 15))
             if res.status_code == 200:
+                time.sleep(random.uniform(0.8, 2.0))
                 return res.text
-            time.sleep(1)
+            time.sleep(random.uniform(1.0, 2.0))
         except Exception:
-            time.sleep(1)
+            time.sleep(random.uniform(1.0, 2.0))
     raise ValueError("요청 실패")
 
 def _extract_blog(html_text):
     soup = BeautifulSoup(html_text, "lxml")
-
-    # 1️⃣ 최신 에디터(4.x, 3.x)
-    sel_list = [
-        ".se-main-container", ".se_component_wrap", "div#postViewArea",
-        ".se_textView", "div#viewTypeSelector", "div#contentArea"
+    selectors = [
+        ".se-main-container", "#postViewArea", ".se_textView",
+        ".se_component_wrap", "div#viewTypeSelector", "div#contentArea"
     ]
     texts = []
-    for sel in sel_list:
+    for sel in selectors:
         for el in soup.select(sel):
             t = _clean(el.get_text(" "))
             if len(t) > 100:
                 texts.append(t)
-
-    # 2️⃣ iframe 내부 추적
     if not texts:
         iframe = soup.find("iframe", id="mainFrame")
         if iframe and iframe.get("src"):
             inner_url = urljoin("https://blog.naver.com", iframe["src"])
-            inner_html = _get_html(inner_url)
-            return _extract_blog(inner_html)
-
+            return _extract_blog(_get_html(inner_url))
     if texts:
         return max(texts, key=len)
-
-    # 3️⃣ 백업: article 태그나 body
     article = soup.find("article")
     if article:
         return _clean(article.get_text(" "))
