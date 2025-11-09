@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from crawler import extract_text_from_url
+from crawler import fetch_and_clean
 from openai import OpenAI
 import os
 
@@ -25,7 +25,7 @@ def summary_advanced():
         if not url:
             return jsonify({"error": "URL 누락"}), 400
 
-        blog_text = extract_text_from_url(url)
+        blog_text = fetch_and_clean(url)
         if not blog_text or len(blog_text.strip()) < 50:
             return jsonify({"error": "본문 추출 실패"}), 400
 
