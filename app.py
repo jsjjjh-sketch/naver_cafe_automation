@@ -1,5 +1,5 @@
 import os
-<<<<<<< HEAD
+HEAD
 from flask import Flask, request, jsonify
 from datetime import datetime
 from openai import OpenAI
@@ -109,7 +109,7 @@ def summary_advanced():
         return jsonify({"error": f"gpt_fail: {str(e)}"}), 500
 
 
-=======
+
 import math
 import openai
 import requests
@@ -272,6 +272,6 @@ def summary_advanced():
     return jsonify({"summary_list": summary_results})
 
 # If running this app directly (for example, in development), start the Flask server
->>>>>>>  "6a3e011" (initial commit)
+"6a3e011" (initial commit)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
