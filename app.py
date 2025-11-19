@@ -1,176 +1,137 @@
 import os
 import math
+import re
 import openai
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
-from datetime import datetime
-from crawler import fetch_and_clean
-from openai import OpenAI
 
 app = Flask(__name__)
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# --- OpenAI 클라이언트 초기화 ---
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-openai.api_key = os.environ.get("OPENAI_API_KEY")
 if not openai.api_key:
-    raise RuntimeError("OpenAI API key not found in environment variables.")
+    raise RuntimeError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
 
-# --- 모델 자동 탐색 ---
-def get_available_model():
-    try:
-        available = [m.id for m in client.models.list().data]
-        for candidate in ["gpt-4.1-mini", "gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]:
-            if candidate in available:
-                return candidate
-        return "gpt-4o-mini"
-    except Exception:
-        return "gpt-4o-mini"
+def normalize_url(url: str) -> str:
+    return url.replace("https://blog.naver.com", "https://m.blog.naver.com")
 
-# --- 외부 규칙 불러오기 ---
-def load_prompt_rules(length, keyword_text, extra_text):
+def build_prompt(text, length, keyword, count, version_count):
     try:
         with open("prompt_rules.txt", "r", encoding="utf-8") as f:
-            rules = f.read()
-        return rules.format(length=length, keyword_text=keyword_text, extra_text=extra_text)
-    except Exception as e:
-        print(f"[WARN] prompt_rules.txt 불러오기 실패: {e}")
-        return f"""
+            rule_template = f.read()
+        system_prompt = rule_template.format(
+            length=length,
+            keyword_text=f"- '{keyword}' 단어를 자연스럽게 {count}회 이상 포함" if keyword else "",
+            extra_text=""
+        )
+    except Exception:
+        system_prompt = f"""
         조건:
-        - 자연스러운 구어체
-        - 크롤링한 링크의 원문 말투를 최대한 정확하게 반영
-        - ㅎㅎ, ㅋㅋ,ㅠㅠ 와 같은 자음, 모음을 사용한 경우 반영
+        - 자연스러운 구어체 (사람에게 설명하듯이)
+        - 홍보티 안 나게
+        - 중복표현 사용불가
+        - 문체는 카페 후기 느낌
+        - 문단마다 표현 다르게
+        - 과한 이모티콘은 2~3개 이내
+        - ㅎㅎ,ㅠㅠ,ㅋㅋ 등의 감정표현 문자 사용
+        - 문장 끝에는 '~했어요' 식 표현 사용
         - 공백 포함 {length}자 내외로 작성
-        {keyword_text}
-        {extra_text}
+        {'- ' + keyword + f" {count}회 이상 포함" if keyword else ''}
         """
 
-# --- URL 본문 추출 ---
-def extract_text_from_url(url: str) -> str:
+    return [
+        {"role": "system", "content": system_prompt.strip()},
+        {
+            "role": "user",
+            "content": f"""다음은 블로그 원문입니다. 내용을 읽고 위 지침에 따라 요약해 주세요.
+
+'''{text}'''
+
+요약 조건: 공백 포함 {length}자 이내, {version_count}개 글로 작성.
+키워드: '{keyword}' (총 {count}회 이상 포함)
+
+작성 부탁드립니다."
+        }
+    ]
+
+def extract_text_from_url(url):
     try:
         res = requests.get(url, timeout=10)
         res.raise_for_status()
-    except Exception:
-        raise
+    except Exception as e:
+        raise RuntimeError(f"크롤링 실패: {e}")
 
     soup = BeautifulSoup(res.text, 'html.parser')
-    for elem in soup(["script", "style"]):
-        elem.decompose()
-    text = soup.get_text(separator=" ").strip()
-    return " ".join(text.split())
+    for tag in soup(["script", "style"]):
+        tag.decompose()
 
-@app.route("/")
-def home():
-    return "Server is running."
+    text = soup.get_text(separator=" ").strip()
+    return re.sub(r'\s+', ' ', text)
+
+def select_model():
+    priority = ["gpt-4.1-mini", "gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
+    for m in priority:
+        try:
+            openai.Model.retrieve(m)
+            return m
+        except:
+            continue
+    return "gpt-3.5-turbo"
 
 @app.route("/api/summary_advanced", methods=["POST"])
 def summary_advanced():
     try:
         data = request.get_json(force=True)
+        url_raw = data.get("url", "").strip()
+        if not url_raw:
+            return jsonify({"error": "URL is required"}), 400
 
-        url = data.get("url", "").strip()
-        length_input = data.get("length", 300)
+        length = data.get("length", 300)
         keyword = data.get("keyword", "").strip()
         count = int(data.get("count", 1))
         extra = data.get("extra", "").strip()
-        version_count_input = data.get("version_count")
+        version_count = int(data.get("version_count", 1))
 
-        if not url:
-            return jsonify({"error": "URL 누락"}), 400
+        urls = re.split(r'[\n,]+', url_raw)
+        urls = [normalize_url(u.strip()) for u in urls if u.strip()]
+        if len(urls) > count:
+            urls = urls[:count]
 
-        urls = [url]
-        if count > 1:
-            import re
-            parts = re.split(r'[\n,]+', url)
-            urls = [u.strip() for u in parts if u.strip()]
-            if len(urls) < count:
-                count = len(urls)
-            if len(urls) > count:
-                urls = urls[:count]
+        model = select_model()
+        results = []
 
-        summary_results = []
-        model_priority = ["gpt-4.1-mini", "gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
-        selected_model = None
-        for model_name in model_priority:
+        for u in urls:
             try:
-                openai.Model.retrieve(model_name)
-                selected_model = model_name
-                break
-            except:
-                continue
-        if not selected_model:
-            selected_model = "gpt-3.5-turbo"
-
-        for idx, post_url in enumerate(urls):
-            try:
-                original_text = fetch_and_clean(post_url)
-            except:
-                summary_results.append(f"(오류) URL에서 내용을 가져오지 못했습니다: {post_url}")
-                continue
-
-            original_length = len(original_text)
-
-            if count > 1:
-                base_length = original_length
-                target_length = math.ceil(base_length * 1.25)
-                versions = 2 if base_length <= 800 else 1
-            elif version_count_input is not None:
-                try:
-                    target_length = int(length_input)
-                except:
-                    target_length = math.ceil(original_length * 1.25)
-                try:
-                    versions = int(version_count_input)
-                except:
-                    versions = 2 if original_length <= 800 else 1
-            else:
-                try:
-                    base_length = int(length_input) if length_input is not None else original_length
-                except:
-                    base_length = original_length
-                target_length = math.ceil(base_length * 1.25)
-                versions = 2 if base_length <= 800 else 1
-
-            keyword_text = f"- '{keyword}' 단어를 자연스럽게 {count}회 이상 포함" if keyword else ""
-            extra_instruction = ""
-            if keyword:
-                extra_instruction += f"\n요약문에 반드시 '{keyword}'를 포함해주세요."
-            if extra:
-                extra_instruction += f"\n추가 요청: {extra}"
-
-            prompt = f"""
-아래는 네이버 블로그 글의 내용이야.
-이걸 참고해서 네이버 카페용 게시글 5개 버전으로 만들어줘.
-
-{load_prompt_rules(target_length, keyword_text, extra)}
-
-원문:
-{original_text}
-            """.strip()
-
-            try:
-                response = client.chat.completions.create(
-                    model=selected_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.8,
-                    max_tokens=int(target_length * 1.2),
-                    n=versions,
-                )
+                raw_text = extract_text_from_url(u)
             except Exception as e:
-                summary_results.append(f"(오류) 요약 생성 실패: {post_url} - {str(e)}")
+                results.append(f"(크롤링 실패) {u} - {str(e)}")
                 continue
 
-            for choice in response.choices:
-                summary_results.append(choice.message.content.strip())
+            prompt = build_prompt(
+                raw_text,
+                length,
+                keyword,
+                count,
+                version_count
+            )
 
-        return jsonify({
-            "summary_list": summary_results,
-            "model_used": selected_model,
-            "timestamp": datetime.now().isoformat()
-        })
+            try:
+                response = openai.ChatCompletion.create(
+                    model=model,
+                    messages=prompt,
+                    temperature=0.7,
+                    n=version_count,
+                    max_tokens=int(length * 1.5)
+                )
+                for choice in response.choices:
+                    results.append(choice.message.content.strip())
+            except Exception as e:
+                results.append(f"(요약 실패) {u} - {str(e)}")
+
+        return jsonify({"summary_list": results, "model_used": model})
 
     except Exception as e:
-        return jsonify({"error": f"gpt_fail: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
