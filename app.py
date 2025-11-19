@@ -1,7 +1,7 @@
 import os
 import math
 import re
-import openai
+import openai 
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
