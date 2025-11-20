@@ -156,10 +156,25 @@ JSON으로만 출력하세요:
         max_tokens=1200
     )
 
-    parsed = parse_json_safe(resp.choices[0].message.content.strip())
+    content = resp.choices[0].message.content.strip()
+    parsed = parse_json_safe(content)
 
+    # ✅ JSON 파싱 실패 시에도 시스템이 죽지 않도록 폴백 처리
     if not parsed:
-        raise RuntimeError("리뷰 구조 분석 실패")
+        print("[WARN] analyze_sections: JSON 파싱 실패, 기본 섹션으로 대체합니다.")
+        # 원문 앞 500자 정도를 도입부로, 나머지를 맛 표현으로 사용
+        intro_part = text[:500]
+        rest_part = text[500:1500]
+
+        return {
+            "intro": intro_part,
+            "store_info": "",
+            "atmosphere": "",
+            "menu_intro": "",
+            "taste_review": rest_part,
+            "strengths": "",
+            "conclusion": ""
+        }
 
     default = {
         "intro": "",
@@ -172,6 +187,7 @@ JSON으로만 출력하세요:
     }
     default.update({k: v for k, v in parsed.items() if isinstance(v, str)})
     return default
+
 
 
 # ---------------------------------------------------------
