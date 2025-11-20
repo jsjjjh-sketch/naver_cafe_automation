@@ -297,10 +297,12 @@ def select_model():
 def summary_advanced():
     try:
         data = request.get_json(force=True)
+        print("[DEBUG] Received data:", data)
 
         url_raw = data.get("url", "").strip()
         if not url_raw:
-            return jsonify({"error": "URL required"}), 400
+            print("[ERROR] Missing URL")
+            return jsonify({"error": "URL is required"}), 400
 
         length = int(data.get("length", 1200))
         tone = data.get("tone", "구어체")
@@ -309,57 +311,47 @@ def summary_advanced():
         url = normalize_url(url_raw)
         model = select_model()
 
+        print("[DEBUG] Model selected:", model)
+        print("[DEBUG] Normalized URL:", url)
+
+        # 본문 추출
         raw_text = extract_text_from_url(url)
+        print("[DEBUG] Extracted text length:", len(raw_text))
+
+        # 섹션 분석
         sections = analyze_sections(raw_text, model)
+        print("[DEBUG] Sections extracted:", sections)
 
-        # -----------------------------------------------
         # 블로그 버전 생성
-        # -----------------------------------------------
-        blog_prompt = build_blog_prompt(sections, tone, style, max(1200, length))
-        blog_resp = openai.ChatCompletion.create(
-            model=model,
-            messages=blog_prompt,
-            temperature=0.7,
-            max_tokens=2500
-        )
-        blog_version = blog_resp.choices[0].message.content.strip()
-
-        # 길이 조절
-        blog_len = measure_length(blog_version)
-        if abs(blog_len - length) > length * 0.1:
-            fix_prompt = build_blog_length_fix_prompt(blog_version, length)
-            fix_resp = openai.ChatCompletion.create(
+        try:
+            blog_prompt = build_blog_prompt(sections, tone, style, length)
+            blog_resp = openai.ChatCompletion.create(
                 model=model,
-                messages=fix_prompt,
-                temperature=0.3,
+                messages=blog_prompt,
+                temperature=0.7,
                 max_tokens=2500
             )
-            blog_version = fix_resp.choices[0].message.content.strip()
+            blog_version = blog_resp.choices[0].message.content.strip()
+            print("[DEBUG] blog_version created")
+        except Exception as e:
+            print("[ERROR] Blog version generation failed:", str(e))
+            return jsonify({"error": "blog_generation_error", "detail": str(e)}), 500
 
-        # -----------------------------------------------
         # 카페 버전 생성
-        # -----------------------------------------------
-        cafe_target = min(900, length)
-        cafe_prompt = build_cafe_prompt(sections, tone, style, cafe_target)
-        cafe_resp = openai.ChatCompletion.create(
-            model=model,
-            messages=cafe_prompt,
-            temperature=0.7,
-            max_tokens=1500
-        )
-        cafe_version = cafe_resp.choices[0].message.content.strip()
-
-        # 길이 조절
-        cafe_len = measure_length(cafe_version)
-        if abs(cafe_len - cafe_target) > cafe_target * 0.1:
-            fix_prompt = build_cafe_length_fix_prompt(cafe_version, cafe_target)
-            fix_resp = openai.ChatCompletion.create(
+        try:
+            cafe_target = min(900, length)
+            cafe_prompt = build_cafe_prompt(sections, tone, style, cafe_target)
+            cafe_resp = openai.ChatCompletion.create(
                 model=model,
-                messages=fix_prompt,
-                temperature=0.3,
+                messages=cafe_prompt,
+                temperature=0.7,
                 max_tokens=1500
             )
-            cafe_version = fix_resp.choices[0].message.content.strip()
+            cafe_version = cafe_resp.choices[0].message.content.strip()
+            print("[DEBUG] cafe_version created")
+        except Exception as e:
+            print("[ERROR] Cafe version generation failed:", str(e))
+            return jsonify({"error": "cafe_generation_error", "detail": str(e)}), 500
 
         return jsonify({
             "blog_version": blog_version,
@@ -370,7 +362,8 @@ def summary_advanced():
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print("[CRITICAL ERROR]", str(e))
+        return jsonify({"error": "critical_failure", "detail": str(e)}), 500
 
 
 # ---------------------------------------------------------
