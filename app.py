@@ -34,7 +34,7 @@ def is_naver_blog(url: str) -> bool:
 
 
 # ---------------------------------------------------------
-# 네이버 블로그 본문 파서
+# 네이버 블로그 본문 추출
 # ---------------------------------------------------------
 def extract_naver_blog_text(html: str) -> str:
     soup = BeautifulSoup(html, 'html.parser')
@@ -67,25 +67,21 @@ def extract_naver_blog_text(html: str) -> str:
     for pat in noise_patterns:
         text = re.sub(pat, " ", text)
 
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    return re.sub(r'\s+', ' ', text).strip()
 
 
 # ---------------------------------------------------------
-# 일반 HTML 파서
+# 일반 HTML 텍스트 추출
 # ---------------------------------------------------------
 def extract_generic_text(html: str) -> str:
     soup = BeautifulSoup(html, 'html.parser')
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
-
-    text = soup.get_text(separator=" ").strip()
-    text = re.sub(r'\s+', ' ', text)
-    return text
+    return re.sub(r'\s+', ' ', soup.get_text(separator=" ").strip())
 
 
 # ---------------------------------------------------------
-# URL에서 본문 추출
+# URL에서 본문 텍스트 추출
 # ---------------------------------------------------------
 def extract_text_from_url(url: str) -> str:
     try:
@@ -101,27 +97,18 @@ def extract_text_from_url(url: str) -> str:
         raise RuntimeError(f"크롤링 실패: {e}")
 
     html = res.text
-
-    if is_naver_blog(url):
-        text = extract_naver_blog_text(html)
-    else:
-        text = extract_generic_text(html)
-
-    if not text:
-        raise RuntimeError("본문 추출 실패: 내용이 비어 있음")
-
-    return text
+    return extract_naver_blog_text(html) if is_naver_blog(url) else extract_generic_text(html)
 
 
 # ---------------------------------------------------------
-# JSON 파싱 안전 처리
+# JSON 파싱
 # ---------------------------------------------------------
 def parse_json_safe(text: str):
     try:
         if "```" in text:
             start = text.find("{")
             end = text.rfind("}")
-            if start != -1 and end != -1 and end > start:
+            if start != -1 and end != -1:
                 return json.loads(text[start:end+1])
         return json.loads(text)
     except:
@@ -129,13 +116,13 @@ def parse_json_safe(text: str):
 
 
 # ---------------------------------------------------------
-# 문단 분석 엔진
+# 자동 문단 구조 분석 엔진
 # ---------------------------------------------------------
 def analyze_sections(text: str, model: str):
     system_prompt = """
 당신의 역할은 음식점 방문 리뷰를 구조화하는 편집자입니다.
 
-다음 7개 항목으로 원문을 분류하세요.
+아래 원문을 7개 문단 카테고리로 분류하세요:
 
 1. 도입부
 2. 매장 기본 정보
@@ -145,8 +132,7 @@ def analyze_sections(text: str, model: str):
 6. 매장 장점 정리
 7. 총평
 
-JSON 형식으로만 출력하세요:
-
+JSON으로만 출력하세요:
 {
   "intro": "",
   "store_info": "",
@@ -159,27 +145,23 @@ JSON 형식으로만 출력하세요:
 """
 
     messages = [
-        {"role": "system", "content": system_prompt.strip()},
-        {
-            "role": "user",
-            "content": f"'''{text}'''"
-        },
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text},
     ]
 
     resp = openai.ChatCompletion.create(
         model=model,
         messages=messages,
         temperature=0.1,
-        max_tokens=1200,
+        max_tokens=1200
     )
 
-    content = resp.choices[0].message.content.strip()
-    sections = parse_json_safe(content)
+    parsed = parse_json_safe(resp.choices[0].message.content.strip())
 
-    if not sections:
-        raise RuntimeError("섹션 분석 실패")
+    if not parsed:
+        raise RuntimeError("리뷰 구조 분석 실패")
 
-    default_sections = {
+    default = {
         "intro": "",
         "store_info": "",
         "atmosphere": "",
@@ -188,84 +170,109 @@ JSON 형식으로만 출력하세요:
         "strengths": "",
         "conclusion": ""
     }
-    default_sections.update({k: v for k, v in sections.items() if isinstance(v, str)})
-    return default_sections
+    default.update({k: v for k, v in parsed.items() if isinstance(v, str)})
+    return default
 
 
 # ---------------------------------------------------------
-# 블로그 프롬프트
+# 블로그용 프롬프트
 # ---------------------------------------------------------
 def build_blog_prompt(sections, tone, style, length):
     system_prompt = f"""
 플랫폼: 네이버 블로그 리뷰 글
-
 목표:
-- 1200~1800자 자연스러운 후기형 리뷰
-- 묘사체 + 서사체 기반
-- 정보성 + 감성 균형
-- 문단 6~7개
-- 각 문단 3~4문장
-- 광고성 문구 금지
-- 자연스러운 방문기처럼 작성
-
-톤(Tone): {tone}
-스타일(Style): {style}
-
-절대 규칙:
-- 과장 금지(대박/존맛/최고 등)
-- 출력은 텍스트만
-"""
-
-    user_prompt = f"""
-다음은 원문 분석 섹션입니다:
-
-{json.dumps(sections, ensure_ascii=False, indent=2)}
-
-이 내용을 바탕으로 네이버 블로그용 리뷰를 작성하세요.
-목표 글자수: {length}자 내외
-"""
-
-    return [
-        {"role": "system", "content": system_prompt.strip()},
-        {"role": "user", "content": user_prompt.strip()},
-    ]
-
-
-# ---------------------------------------------------------
-# 카페 프롬프트
-# ---------------------------------------------------------
-def build_cafe_prompt(sections, tone, style, length):
-    system_prompt = f"""
-플랫폼: 네이버 카페 후기
-
-목표:
-- 600~900자
-- 구어체 + 후기톤
-- 문단 4~6개
-- 각 문단 2~3문장
-- 핵심 위주
-- 간결하고 가독성 좋게
+- 1200~1800자
+- 묘사체 + 서사체
+- 구어체 기반 자연스러운 후기
+- 문단 6~7개, 각 문단 3~4문장
 
 톤(Tone): {tone}
 스타일(Style): {style}
 
 주의:
-- 과한 감탄/광고 문구 금지
-- 자연스러운 후기 말투 유지
+- 과장 금지
+- 광고 문구 금지
 """
 
     user_prompt = f"""
-다음은 원문 섹션입니다:
-
+섹션 데이터:
 {json.dumps(sections, ensure_ascii=False, indent=2)}
 
-이 내용을 바탕으로 네이버 카페용 리뷰를 작성하세요.
-목표 글자수: {length}자 내외
+위 내용을 활용해 블로그 리뷰를 작성하세요.
+목표 글자수: {length}자
 """
 
     return [
-        {"role": "system", "content": system_prompt.strip()},
-        {"role": "user", "content": user_prompt.strip()},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+# ---------------------------------------------------------
+# 카페용 프롬프트
+# ---------------------------------------------------------
+def build_cafe_prompt(sections, tone, style, length):
+    system_prompt = f"""
+플랫폼: 네이버 카페 후기
+목표:
+- 600~900자
+- 간결한 후기체
+- 문단 4~6개
+
+톤(Tone): {tone}
+스타일(Style): {style}
+
+주의:
+- 과한 감탄 금지
+- 광고 문구 금지
+"""
+
+    user_prompt = f"""
+섹션 데이터:
+{json.dumps(sections, ensure_ascii=False, indent=2)}
+
+위 내용을 바탕으로 카페 후기 스타일로 작성하세요.
+목표 글자수: {length}자
+"""
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+# ---------------------------------------------------------
+# 길이 측정
+# ---------------------------------------------------------
+def measure_length(text: str) -> int:
+    return len(text)
+
+
+# ---------------------------------------------------------
+# 길이 재조정 프롬프트 (블로그)
+# ---------------------------------------------------------
+def build_blog_length_fix_prompt(text, target):
+    return [
+        {"role": "system", "content": f"""
+아래 글의 내용과 문단 구조를 유지하면서 공백 포함 {target}자로 조정하세요.
+- 과장 금지
+- 자연스러운 압축 또는 확장
+"""},
+        {"role": "user", "content": text}
+    ]
+
+
+# ---------------------------------------------------------
+# 길이 재조정 프롬프트 (카페)
+# ---------------------------------------------------------
+def build_cafe_length_fix_prompt(text, target):
+    return [
+        {"role": "system", "content": f"""
+아래 후기 내용을 공백 포함 {target}자로 자연스럽게 조정해 주세요.
+- 문단 구조 유지
+- 핵심만 부드럽게 압축/확장
+"""},
+        {"role": "user", "content": text}
     ]
 
 
@@ -290,14 +297,14 @@ def select_model():
 def summary_advanced():
     try:
         data = request.get_json(force=True)
-        url_raw = data.get("url", "").strip()
 
+        url_raw = data.get("url", "").strip()
         if not url_raw:
-            return jsonify({"error": "URL is required"}), 400
+            return jsonify({"error": "URL required"}), 400
 
         length = int(data.get("length", 1200))
-        tone = data.get("tone", "구어체").strip()
-        style = data.get("style", "기본체").strip()
+        tone = data.get("tone", "구어체")
+        style = data.get("style", "기본체")
 
         url = normalize_url(url_raw)
         model = select_model()
@@ -305,16 +312,10 @@ def summary_advanced():
         raw_text = extract_text_from_url(url)
         sections = analyze_sections(raw_text, model)
 
-        # ---------------------------
-        # Blog Version
-        # ---------------------------
-        blog_prompt = build_blog_prompt(
-            sections=sections,
-            tone=tone,
-            style=style,
-            length=max(1200, length)
-        )
-
+        # -----------------------------------------------
+        # 블로그 버전 생성
+        # -----------------------------------------------
+        blog_prompt = build_blog_prompt(sections, tone, style, max(1200, length))
         blog_resp = openai.ChatCompletion.create(
             model=model,
             messages=blog_prompt,
@@ -323,16 +324,23 @@ def summary_advanced():
         )
         blog_version = blog_resp.choices[0].message.content.strip()
 
-        # ---------------------------
-        # Cafe Version
-        # ---------------------------
-        cafe_prompt = build_cafe_prompt(
-            sections=sections,
-            tone=tone,
-            style=style,
-            length=min(900, length)
-        )
+        # 길이 조절
+        blog_len = measure_length(blog_version)
+        if abs(blog_len - length) > length * 0.1:
+            fix_prompt = build_blog_length_fix_prompt(blog_version, length)
+            fix_resp = openai.ChatCompletion.create(
+                model=model,
+                messages=fix_prompt,
+                temperature=0.3,
+                max_tokens=2500
+            )
+            blog_version = fix_resp.choices[0].message.content.strip()
 
+        # -----------------------------------------------
+        # 카페 버전 생성
+        # -----------------------------------------------
+        cafe_target = min(900, length)
+        cafe_prompt = build_cafe_prompt(sections, tone, style, cafe_target)
         cafe_resp = openai.ChatCompletion.create(
             model=model,
             messages=cafe_prompt,
@@ -340,6 +348,18 @@ def summary_advanced():
             max_tokens=1500
         )
         cafe_version = cafe_resp.choices[0].message.content.strip()
+
+        # 길이 조절
+        cafe_len = measure_length(cafe_version)
+        if abs(cafe_len - cafe_target) > cafe_target * 0.1:
+            fix_prompt = build_cafe_length_fix_prompt(cafe_version, cafe_target)
+            fix_resp = openai.ChatCompletion.create(
+                model=model,
+                messages=fix_prompt,
+                temperature=0.3,
+                max_tokens=1500
+            )
+            cafe_version = fix_resp.choices[0].message.content.strip()
 
         return jsonify({
             "blog_version": blog_version,
