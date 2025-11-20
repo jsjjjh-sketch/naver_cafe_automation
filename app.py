@@ -5,6 +5,7 @@ import openai
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -12,9 +13,118 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 if not openai.api_key:
     raise RuntimeError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
 
+
+# ---------------------------------------------------------
+# 1) URL 정규화
+# ---------------------------------------------------------
 def normalize_url(url: str) -> str:
     return url.replace("https://blog.naver.com", "https://m.blog.naver.com")
 
+
+# ---------------------------------------------------------
+# 2) 네이버 블로그 판별
+# ---------------------------------------------------------
+def is_naver_blog(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        return ("blog.naver.com" in host)
+    except:
+        return False
+
+
+# ---------------------------------------------------------
+# 3) 네이버 블로그 본문 전용 파서
+# ---------------------------------------------------------
+def extract_naver_blog_text(html: str) -> str:
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # 스크립트 제거
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    container = None
+
+    # 1) 최신/모바일 에디터
+    if not container:
+        container = soup.find("div", class_=re.compile(r"\bse-main-container\b"))
+
+    # 2) 구형 에디터
+    if not container:
+        container = soup.find("div", id=re.compile(r"^(postViewArea|printPost1)$"))
+
+    # 3) 보조 선택자
+    if not container:
+        container = soup.find("div", id="post-view") or soup.find(
+            "div", class_=re.compile(r"\bse_component_wrap\b")
+        )
+
+    # 4) fallback
+    if not container:
+        container = soup.body or soup
+
+    text = container.get_text(separator=" ", strip=True)
+
+    # 네이버 블로그 공통 UI 텍스트 제거
+    noise_patterns = [
+        r"이웃추가",
+        r"공감\s*\d*",
+        r"댓글\s*\d*",
+        r"공유하기",
+        r"신고하기",
+    ]
+    for pat in noise_patterns:
+        text = re.sub(pat, " ", text)
+
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+# ---------------------------------------------------------
+# 4) 일반 HTML 텍스트 파서
+# ---------------------------------------------------------
+def extract_generic_text(html: str) -> str:
+    soup = BeautifulSoup(html, 'html.parser')
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = soup.get_text(separator=" ").strip()
+    text = re.sub(r'\s+', ' ', text)
+    return text
+
+
+# ---------------------------------------------------------
+# 5) URL에서 본문 내용 추출 → 네이버 블로그면 전용 파서 적용
+# ---------------------------------------------------------
+def extract_text_from_url(url: str) -> str:
+    try:
+        res = requests.get(url, timeout=10, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36"
+            )
+        })
+        res.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"크롤링 실패: {e}")
+
+    html = res.text
+
+    # 네이버 블로그 전용 파서
+    if is_naver_blog(url):
+        text = extract_naver_blog_text(html)
+    else:
+        text = extract_generic_text(html)
+
+    if not text:
+        raise RuntimeError("본문 추출 실패: 내용이 비어 있음")
+
+    return text
+
+
+# ---------------------------------------------------------
+# 6) 요약 모델 프롬프트 조립
+# ---------------------------------------------------------
 def build_prompt(text, length, keyword, count, version_count):
     try:
         with open("prompt_rules.txt", "r", encoding="utf-8") as f:
@@ -27,15 +137,12 @@ def build_prompt(text, length, keyword, count, version_count):
     except Exception:
         system_prompt = f"""
         조건:
-        - 자연스러운 구어체 (사람에게 설명하듯이)
+        - 자연스러운 구어체
         - 홍보티 안 나게
-        - 중복표현 사용불가
-        - 문체는 카페 후기 느낌
-        - 문단마다 표현 다르게
-        - 과한 이모티콘은 2~3개 이내
-        - ㅎㅎ,ㅠㅠ,ㅋㅋ 등의 감정표현 문자 사용
-        - 문장 끝에는 '~했어요' 식 표현 사용
-        - 공백 포함 {length}자 내외로 작성
+        - 중복표현 금지
+        - 후기 느낌
+        - 문단마다 표현 변화
+        - 공백 포함 {length}자 내외
         {'- ' + keyword + f" {count}회 이상 포함" if keyword else ''}
         """
 
@@ -50,24 +157,15 @@ def build_prompt(text, length, keyword, count, version_count):
 요약 조건: 공백 포함 {length}자 이내, {version_count}개 글로 작성.
 키워드: '{keyword}' (총 {count}회 이상 포함)
 
-작성 부탁드립니다."
+작성해 주세요.
+"""
         }
     ]
 
-def extract_text_from_url(url):
-    try:
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(f"크롤링 실패: {e}")
 
-    soup = BeautifulSoup(res.text, 'html.parser')
-    for tag in soup(["script", "style"]):
-        tag.decompose()
-
-    text = soup.get_text(separator=" ").strip()
-    return re.sub(r'\s+', ' ', text)
-
+# ---------------------------------------------------------
+# 7) 모델 선택
+# ---------------------------------------------------------
 def select_model():
     priority = ["gpt-4.1-mini", "gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
     for m in priority:
@@ -78,6 +176,10 @@ def select_model():
             continue
     return "gpt-3.5-turbo"
 
+
+# ---------------------------------------------------------
+# 8) 메인 API 엔드포인트
+# ---------------------------------------------------------
 @app.route("/api/summary_advanced", methods=["POST"])
 def summary_advanced():
     try:
@@ -133,5 +235,9 @@ def summary_advanced():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# ---------------------------------------------------------
+# 9) 서버 실행
+# ---------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
