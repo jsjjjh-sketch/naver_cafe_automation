@@ -1,11 +1,11 @@
 import os
-import math
 import re
-import openai 
+import json
+import openai
 import requests
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
-from urllib.parse import urlparse
 
 app = Flask(__name__)
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -28,8 +28,8 @@ def is_naver_blog(url: str) -> bool:
     try:
         parsed = urlparse(url)
         host = parsed.netloc.lower()
-        return ("blog.naver.com" in host)
-    except:
+        return "blog.naver.com" in host
+    except Exception:
         return False
 
 
@@ -39,7 +39,6 @@ def is_naver_blog(url: str) -> bool:
 def extract_naver_blog_text(html: str) -> str:
     soup = BeautifulSoup(html, 'html.parser')
 
-    # 스크립트 제거
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
@@ -65,7 +64,6 @@ def extract_naver_blog_text(html: str) -> str:
 
     text = container.get_text(separator=" ", strip=True)
 
-    # 네이버 블로그 공통 UI 텍스트 제거
     noise_patterns = [
         r"이웃추가",
         r"공감\s*\d*",
@@ -93,7 +91,7 @@ def extract_generic_text(html: str) -> str:
 
 
 # ---------------------------------------------------------
-# 5) URL에서 본문 내용 추출 → 네이버 블로그면 전용 파서 적용
+# 5) URL에서 본문 내용 추출
 # ---------------------------------------------------------
 def extract_text_from_url(url: str) -> str:
     try:
@@ -110,7 +108,6 @@ def extract_text_from_url(url: str) -> str:
 
     html = res.text
 
-    # 네이버 블로그 전용 파서
     if is_naver_blog(url):
         text = extract_naver_blog_text(html)
     else:
@@ -123,9 +120,9 @@ def extract_text_from_url(url: str) -> str:
 
 
 # ---------------------------------------------------------
-# 6) 요약 모델 프롬프트 조립
+# 6) 기존 단일 요약 프롬프트 (fallback 용)
 # ---------------------------------------------------------
-def build_prompt(text, length, keyword, count, version_count):
+def build_simple_prompt(text, length, keyword, count, version_count):
     try:
         with open("prompt_rules.txt", "r", encoding="utf-8") as f:
             rule_template = f.read()
@@ -164,7 +161,178 @@ def build_prompt(text, length, keyword, count, version_count):
 
 
 # ---------------------------------------------------------
-# 7) 모델 선택
+# 7) JSON 파싱 유틸
+# ---------------------------------------------------------
+def parse_json_safe(text: str):
+    """모델 출력에서 JSON 부분만 안전하게 추출"""
+    try:
+        # ```json ... ``` 형태 처리
+        if "```" in text:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(text[start:end+1])
+        return json.loads(text)
+    except Exception:
+        # 실패 시 None
+        return None
+
+
+# ---------------------------------------------------------
+# 8) 자동 문단 구조 엔진 - 섹션 분석
+# ---------------------------------------------------------
+def analyze_sections(text: str, model: str):
+    """
+    원문 리뷰를 7개 의미 단위로 분류:
+    intro / store_info / atmosphere / menu_intro / taste_review / strengths / conclusion
+    """
+    system_prompt = """
+당신의 역할은 음식점 방문 리뷰를 구조화하는 편집자입니다.
+
+아래 원문에서 내용을 다음 7개 범주로 분류해 주세요.
+
+1. 도입부 (방문 계기, 누구와, 언제, 첫 인상 등)
+2. 매장 기본 정보 (상호명, 주소, 영업시간, 연락처, 주차 등)
+3. 공간/분위기 묘사 (인테리어, 좌석, 조명, 음악, 분위기, 청결 등)
+4. 주문 메뉴 소개 (주문한 메뉴, 선택 이유, 대표 메뉴 등)
+5. 맛/식감/향 표현 (첫 맛, 식감, 향, 양, 포만감, 전반적인 맛 평가 등)
+6. 매장 장점 정리 (서비스, 친절함, 가격, 구성, 재방문 의사 등)
+7. 총평 (전체적인 감상, 다시 가고 싶은지, 자연스러운 마무리 멘트)
+
+각 범주에 해당하는 문장들을 모아서 다음 JSON 형식으로만 출력하세요.
+
+{
+  "intro": "",
+  "store_info": "",
+  "atmosphere": "",
+  "menu_intro": "",
+  "taste_review": "",
+  "strengths": "",
+  "conclusion": ""
+}
+
+JSON 이외의 설명, 문장, 접두사/접미사는 출력하지 마세요.
+"""
+    messages = [
+        {"role": "system", "content": system_prompt.strip()},
+        {
+            "role": "user",
+            "content": f"다음은 음식점 방문 블로그 리뷰 원문입니다. 위 지침에 따라 내용을 7개 범주로 분류해서 JSON만 출력해 주세요.\n\n'''{text}'''"
+        }
+    ]
+
+    resp = openai.ChatCompletion.create(
+        model=model,
+        messages=messages,
+        temperature=0.1,
+        max_tokens=1200,
+    )
+    content = resp.choices[0].message.content.strip()
+    sections = parse_json_safe(content)
+    if not sections:
+        raise RuntimeError("섹션 분석 JSON 파싱 실패")
+    # 키 누락 방지
+    default_sections = {
+        "intro": "",
+        "store_info": "",
+        "atmosphere": "",
+        "menu_intro": "",
+        "taste_review": "",
+        "strengths": "",
+        "conclusion": ""
+    }
+    default_sections.update({k: v for k, v in sections.items() if isinstance(v, str)})
+    return default_sections
+
+
+# ---------------------------------------------------------
+# 9) 자동 문단 구조 + 톤/스타일 재작성 프롬프트
+# ---------------------------------------------------------
+def build_structured_rewrite_prompt(
+    sections: dict,
+    length: int,
+    tone: str,
+    style: str,
+    keyword: str,
+    count: int,
+    extra: str,
+    version_count: int
+):
+    """
+    섹션 JSON + 톤/스타일 정보를 이용해
+    광고대행사 표준 리뷰 스타일로 문단 구조를 갖춘 글을 생성하는 프롬프트
+    """
+    tone_text = tone or "구어체"
+    style_text = style or "기본체"
+
+    keyword_rule = ""
+    if keyword:
+        keyword_rule = f"- '{keyword}' 단어를 자연스럽게 {count}회 이상 포함하세요."
+
+    extra_rule = ""
+    if extra:
+        extra_rule = f"- 추가 스타일/컨셉: {extra}"
+
+    system_prompt = f"""
+당신의 역할은 음식점 리뷰 전문 카피라이터입니다.
+
+목표:
+- 원문에서 추출된 내용을 바탕으로, 광고 티가 과하지 않으면서도 읽기 좋은 리뷰를 작성합니다.
+- 글은 자동 생성이지만, 사람이 직접 쓴 후기처럼 자연스러워야 합니다.
+
+기본 문체 기준:
+- 기본 말투: 부드러운 해요체 기반 구어체
+- 문장은 12~22자 정도의 자연스러운 길이
+- 과장된 표현(최고, 끝판왕, 존맛, 대박 등) 사용 금지
+- 의미 없는 과한 감탄사 연속 사용 금지
+- 후기 느낌 + 정보성을 함께 전달
+
+말투(Tone):
+- 현재 선택된 톤: {tone_text}
+- 이 톤에 맞게 어미, 단어 선택, 문장 분위기를 조정하세요.
+
+스타일(Style):
+- 현재 선택된 스타일: {style_text}
+- 스타일에 맞게 서사/묘사/간결/화려함 등의 비율을 조절하세요.
+
+글 전체 구성:
+1. 도입부
+2. 매장 기본 정보 요약
+3. 공간/분위기 묘사
+4. 주문 메뉴 소개
+5. 맛/식감/향 표현 (핵심 문단)
+6. 매장 장점 정리
+7. 총평/마무리
+
+작성 규칙:
+- 위 7개 문단 순서를 유지하세요.
+- 각 문단은 2~4문장 정도로 구성하세요.
+- 전체 분량은 공백 포함 약 {length}자 내외로 조정하세요.
+- 광고 문구(꼭 가보세요, 강력 추천합니다 등)는 사용하지 마세요.
+{keyword_rule}
+{extra_rule}
+"""
+
+    user_prompt = f"""
+아래는 원문에서 추출된 섹션별 내용입니다. 이 내용을 기반으로 위 지침에 따라 하나의 자연스러운 리뷰 글을 작성해 주세요.
+
+[섹션 데이터(JSON)]:
+{json.dumps(sections, ensure_ascii=False, indent=2)}
+
+요청:
+- 7개 문단 구조를 유지하면서, 하나의 글처럼 자연스럽게 이어지도록 작성해 주세요.
+- 출력은 리뷰 본문 텍스트만 작성해 주세요. (제목, 해시태그, 설명 문구는 포함하지 마세요.)
+- 총 {version_count}개의 서로 다른 버전이 필요합니다. (동일 정보 기반, 표현과 흐름만 다르게 작성)
+"""
+
+    return [
+        {"role": "system", "content": system_prompt.strip()},
+        {"role": "user", "content": user_prompt.strip()}
+    ]
+
+
+# ---------------------------------------------------------
+# 10) 모델 선택
 # ---------------------------------------------------------
 def select_model():
     priority = ["gpt-4.1-mini", "gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
@@ -172,13 +340,13 @@ def select_model():
         try:
             openai.Model.retrieve(m)
             return m
-        except:
+        except Exception:
             continue
     return "gpt-3.5-turbo"
 
 
 # ---------------------------------------------------------
-# 8) 메인 API 엔드포인트
+# 11) 메인 API 엔드포인트
 # ---------------------------------------------------------
 @app.route("/api/summary_advanced", methods=["POST"])
 def summary_advanced():
@@ -188,11 +356,15 @@ def summary_advanced():
         if not url_raw:
             return jsonify({"error": "URL is required"}), 400
 
-        length = data.get("length", 300)
+        length = int(data.get("length", 300))
         keyword = data.get("keyword", "").strip()
         count = int(data.get("count", 1))
         extra = data.get("extra", "").strip()
         version_count = int(data.get("version_count", 1))
+
+        # 새 옵션 (없으면 기본값)
+        tone = data.get("tone", "구어체").strip() or "구어체"
+        style = data.get("style", "기본체").strip() or "기본체"
 
         urls = re.split(r'[\n,]+', url_raw)
         urls = [normalize_url(u.strip()) for u in urls if u.strip()]
@@ -209,35 +381,68 @@ def summary_advanced():
                 results.append(f"(크롤링 실패) {u} - {str(e)}")
                 continue
 
-            prompt = build_prompt(
-                raw_text,
-                length,
-                keyword,
-                count,
-                version_count
-            )
-
             try:
+                # 1) 섹션 분석
+                sections = analyze_sections(raw_text, model)
+
+                # 2) 구조화 + 톤/스타일 적용 재작성
+                prompt = build_structured_rewrite_prompt(
+                    sections=sections,
+                    length=length,
+                    tone=tone,
+                    style=style,
+                    keyword=keyword,
+                    count=count,
+                    extra=extra,
+                    version_count=version_count
+                )
+
                 response = openai.ChatCompletion.create(
                     model=model,
                     messages=prompt,
                     temperature=0.7,
                     n=version_count,
-                    max_tokens=int(length * 1.5)
+                    max_tokens=int(length * 2)
                 )
+
                 for choice in response.choices:
                     results.append(choice.message.content.strip())
-            except Exception as e:
-                results.append(f"(요약 실패) {u} - {str(e)}")
 
-        return jsonify({"summary_list": results, "model_used": model})
+            except Exception as e:
+                # 문제가 생기면 기존 단일 요약 방식으로 fallback
+                fallback_prompt = build_simple_prompt(
+                    raw_text,
+                    length,
+                    keyword,
+                    count,
+                    version_count
+                )
+                try:
+                    fallback_resp = openai.ChatCompletion.create(
+                        model=model,
+                        messages=fallback_prompt,
+                        temperature=0.7,
+                        n=version_count,
+                        max_tokens=int(length * 1.5)
+                    )
+                    for choice in fallback_resp.choices:
+                        results.append("(fallback)\n" + choice.message.content.strip())
+                except Exception as e2:
+                    results.append(f"(요약 실패) {u} - {str(e)} / fallback 실패: {str(e2)}")
+
+        return jsonify({
+            "summary_list": results,
+            "model_used": model,
+            "tone_used": tone,
+            "style_used": style
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------
-# 9) 서버 실행
+# 12) 서버 실행
 # ---------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
