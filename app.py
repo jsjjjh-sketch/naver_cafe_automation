@@ -193,67 +193,76 @@ JSON으로만 출력하세요:
 # ---------------------------------------------------------
 # 블로그용 프롬프트
 # ---------------------------------------------------------
-def build_blog_prompt(sections, tone, style, length):
+def build_blog_prompt(sections, tone, style, length, keyword, count, extra):
     system_prompt = f"""
 플랫폼: 네이버 블로그 리뷰 글
-목표:
-- 1200~1800자
-- 묘사체 + 서사체
-- 구어체 기반 자연스러운 후기
+
+요구사항:
+- 공백 포함 {length}자 ±5% 범위로 맞춰 작성
+- 키워드 "{keyword}" 를 최소 {count}회 자연스럽게 포함
+- 추가 요소: "{extra}" 는 내용의 흐름에 맞게 자연스럽게 반영
 - 문단 6~7개, 각 문단 3~4문장
+- 도입 → 분위기 → 메뉴 → 맛 표현 → 장점 → 총평의 구조 유지
+- 광고 문구 금지
+- 문장을 자연스럽게 이어가기
 
 톤(Tone): {tone}
 스타일(Style): {style}
-
-주의:
-- 과장 금지
-- 광고 문구 금지
 """
 
     user_prompt = f"""
-섹션 데이터:
+아래는 원문에서 추출한 리뷰 섹션입니다:
+
 {json.dumps(sections, ensure_ascii=False, indent=2)}
 
-위 내용을 활용해 블로그 리뷰를 작성하세요.
-목표 글자수: {length}자
+위 내용을 기반으로 자연스럽고 읽기 좋은 블로그 리뷰 글을 만들어주세요.
+
+반드시 지킬 조건:
+1) 키워드 "{keyword}"를 최소 {count}회 포함
+2) 공백 포함 {length}자 ±5% 유지
+3) 문단은 6~7개
+4) 내용 삭제 금지, 맥락 유지
+
+추가 요청: "{extra}"
 """
 
     return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {"role": "system", "content": system_prompt.strip()},
+        {"role": "user", "content": user_prompt.strip()},
     ]
 
 
 # ---------------------------------------------------------
 # 카페용 프롬프트
 # ---------------------------------------------------------
-def build_cafe_prompt(sections, tone, style, length):
+def build_cafe_prompt(sections, tone, style, length, keyword, count, extra):
     system_prompt = f"""
 플랫폼: 네이버 카페 후기
-목표:
-- 600~900자
-- 간결한 후기체
+
+요구사항:
+- 공백 포함 {length}자 ±5%
+- 키워드 "{keyword}" 최소 {count}회 포함
 - 문단 4~6개
-
-톤(Tone): {tone}
-스타일(Style): {style}
-
-주의:
-- 과한 감탄 금지
-- 광고 문구 금지
+- 간결하고 후기 느낌 표현
+- 추가 요청 "{extra}" 자연스럽게 반영
 """
 
     user_prompt = f"""
-섹션 데이터:
+아래는 원문에서 추출된 주요 내용입니다:
+
 {json.dumps(sections, ensure_ascii=False, indent=2)}
 
-위 내용을 바탕으로 카페 후기 스타일로 작성하세요.
-목표 글자수: {length}자
+위 내용을 기반으로 카페 후기 스타일의 글을 작성해주세요.
+
+반드시 지킬 조건:
+- 키워드 "{keyword}" 최소 {count}회 삽입
+- {length}자 ±5%
+- 후기처럼 자연스럽고 쉬운 표현
 """
 
     return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {"role": "system", "content": system_prompt.strip()},
+        {"role": "user", "content": user_prompt.strip()},
     ]
 
 
@@ -267,12 +276,13 @@ def measure_length(text: str) -> int:
 # ---------------------------------------------------------
 # 길이 재조정 프롬프트 (블로그)
 # ---------------------------------------------------------
-def build_blog_length_fix_prompt(text, target):
+def build_blog_length_fix_prompt(text, target, keyword, count):
     return [
         {"role": "system", "content": f"""
-아래 글의 내용과 문단 구조를 유지하면서 공백 포함 {target}자로 조정하세요.
-- 과장 금지
-- 자연스러운 압축 또는 확장
+아래 글을 공백 포함 {target}자 ±5%로 수정하세요.
+키워드 "{keyword}"는 최소 {count}회 유지해야 합니다.
+문단 구조와 내용 흐름은 변경하지 마세요.
+삭제 금지, 의미 축약 금지. 표현만 자연스럽게 압축/확장하세요.
 """},
         {"role": "user", "content": text}
     ]
@@ -281,12 +291,13 @@ def build_blog_length_fix_prompt(text, target):
 # ---------------------------------------------------------
 # 길이 재조정 프롬프트 (카페)
 # ---------------------------------------------------------
-def build_cafe_length_fix_prompt(text, target):
+def build_cafe_length_fix_prompt(text, target, keyword, count):
     return [
         {"role": "system", "content": f"""
-아래 후기 내용을 공백 포함 {target}자로 자연스럽게 조정해 주세요.
-- 문단 구조 유지
-- 핵심만 부드럽게 압축/확장
+아래 후기를 공백 포함 {target}자 ±5%로 재작성해주세요.
+키워드 "{keyword}"는 최소 {count}회 유지하세요.
+후기 톤을 유지하며 부드럽게 압축/확장하세요.
+내용 삭제 금지.
 """},
         {"role": "user", "content": text}
     ]
@@ -339,47 +350,58 @@ def summary_advanced():
         print("[DEBUG] Sections extracted:", sections)
 
         # 블로그 버전 생성
-        try:
-            blog_prompt = build_blog_prompt(sections, tone, style, length)
-            blog_resp = openai.ChatCompletion.create(
-                model=model,
-                messages=blog_prompt,
-                temperature=0.7,
-                max_tokens=2500
-            )
-            blog_version = blog_resp.choices[0].message.content.strip()
-            print("[DEBUG] blog_version created")
-        except Exception as e:
-            print("[ERROR] Blog version generation failed:", str(e))
-            return jsonify({"error": "blog_generation_error", "detail": str(e)}), 500
+try:
+    blog_prompt = build_blog_prompt(
+        sections=sections,
+        tone=tone,
+        style=style,
+        length=max(1200, length),
+        keyword=data.get("keyword", ""),
+        count=data.get("count", 1),
+        extra=data.get("extra", "")
+    )
+
+    blog_resp = openai.ChatCompletion.create(
+        model=model,
+        messages=blog_prompt,
+        temperature=0.7,
+        max_tokens=2500
+    )
+    blog_version = blog_resp.choices[0].message.content.strip()
+    print("[DEBUG] blog_version created")
+
+except Exception as e:
+    print("[ERROR] Blog version generation failed:", str(e))
+    return jsonify({"error": "blog_generation_error", "detail": str(e)}), 500
+
 
         # 카페 버전 생성
-        try:
-            cafe_target = min(900, length)
-            cafe_prompt = build_cafe_prompt(sections, tone, style, cafe_target)
-            cafe_resp = openai.ChatCompletion.create(
-                model=model,
-                messages=cafe_prompt,
-                temperature=0.7,
-                max_tokens=1500
-            )
-            cafe_version = cafe_resp.choices[0].message.content.strip()
-            print("[DEBUG] cafe_version created")
-        except Exception as e:
-            print("[ERROR] Cafe version generation failed:", str(e))
-            return jsonify({"error": "cafe_generation_error", "detail": str(e)}), 500
+try:
+    cafe_target = min(900, length)
 
-        return jsonify({
-            "blog_version": blog_version,
-            "cafe_version": cafe_version,
-            "tone_used": tone,
-            "style_used": style,
-            "model_used": model
-        })
+    cafe_prompt = build_cafe_prompt(
+        sections=sections,
+        tone=tone,
+        style=style,
+        length=cafe_target,
+        keyword=data.get("keyword", ""),
+        count=data.get("count", 1),
+        extra=data.get("extra", "")
+    )
 
-    except Exception as e:
-        print("[CRITICAL ERROR]", str(e))
-        return jsonify({"error": "critical_failure", "detail": str(e)}), 500
+    cafe_resp = openai.ChatCompletion.create(
+        model=model,
+        messages=cafe_prompt,
+        temperature=0.7,
+        max_tokens=1500
+    )
+    cafe_version = cafe_resp.choices[0].message.content.strip()
+    print("[DEBUG] cafe_version created")
+
+except Exception as e:
+    print("[ERROR] Cafe version generation failed:", str(e))
+    return jsonify({"error": "cafe_generation_error", "detail": str(e)}), 500
+
 
 
 # ---------------------------------------------------------
