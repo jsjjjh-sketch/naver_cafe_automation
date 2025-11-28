@@ -308,8 +308,9 @@ def build_cafe_prompt(sections, tone, style, length, keyword, count, extra):
 스타일(Style): {style}
 
 작성 규칙:
-- 한 문장은 8~18자 정도로 짧게 유지
-- 과장된 표현, 노골적인 광고 표현 사용 금지
+- 문단은 반드시 줄바꿈(빈 줄)으로 구분할 것
+- 한 문장은 8~18자로 짧게 유지
+- 과장 표현 및 광고성 표현 금지
 {keyword_rule}{extra_rule}
 """
 
@@ -318,11 +319,12 @@ def build_cafe_prompt(sections, tone, style, length, keyword, count, extra):
 
 {json.dumps(sections, ensure_ascii=False, indent=2)}
 
-이 내용을 기반으로 네이버 카페 게시판에 올릴 후기 글을 작성해 주세요.
+이 내용을 기반으로 네이버 카페 게시판에 올릴 후기 글을 생성하세요.
 
-조건 요약:
-1) 공백 포함 {length}자 ±5% 분량
-2) 간결하고 솔직한 후기 느낌
+반드시 지킬 조건:
+1) 문단은 반드시 "빈 줄"을 넣어 명확히 구분할 것
+2) 공백 포함 {length}자 ±5% 유지
+3) 간결하고 담백한 후기 톤 유지
 """
 
     return [
